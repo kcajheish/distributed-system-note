@@ -8,7 +8,7 @@ To process multiple tasks in parallel, dataset is distributed across multiple ma
     - output: generate intermediate key/value pairs which are stored in the corresponding partition
 - Reduce function
     - input: intermediate key/value pairs for a given key
-    - output: merge the value for a intermediate key and store the results in a reduce parition file.
+    - output: merge the value for an intermediate key and store the results in a reduce partition file.
 - Tasks are assigned by a master
     - It simplifies the design. Worker doesn't have to remember the status of other works by over-talking on the network. Only master knows status of all the workers.
 - Locality: worker reads input file from nearby machine
@@ -18,8 +18,6 @@ To process multiple tasks in parallel, dataset is distributed across multiple ma
     - Reduce worker reads input file on nearby map worker machine.
 - When tasks fail, simply re-run them.
     - Note that input and output are immutable
-
-![alt text](image.png)
 - M splits
     - input data are split into M slots
 - R splits
@@ -27,19 +25,19 @@ To process multiple tasks in parallel, dataset is distributed across multiple ma
         - hash(intermediate_key) % R
     - Each reduce worker processes data from a partition. Output is stored in one partition, too.
 
-## MapReduce Lab Implementation ##
+## MapReduce Lab ##
 
-In this lab, tasks are not run on multiple machines but rather on multiple threads on a machine.
+In this lab, tasks are not run on multiple machines but rather on multiple processes on a machine.
 - Every input/output files can be found on the local disk. You don't have to worry about picking the right(nearby) worker machine for the tasks.
 
 ```golang
-// @ master
+const MAP = 0
+const REDUCE = 1
+const EXIT = 2
+
 const IDLE = 0
 const IN_PROGRESS = 1
 const COMPLETED = 2
-
-const MAP = 0
-const REDUCE = 1
 
 type Task struct {
 	TaskNumber int
@@ -48,38 +46,50 @@ type Task struct {
 	Status     int
 	UnixTime   int64
 	index      int // position at the priority queue
+	Assigned   int
 }
 ```
-- **Status** field in the **Task** type can be in three state: **IDLE**, **IN_PROGRESS**, **COMPLETED**.
-- **JobType** can be either **MAP** or **REDUCE**.
-- **Files** is a slice of string. A worker may have to work on multiple files in one partition.
-- **UnixTime** is updated to current when status of the task changes. Master health check the in-progress task by how much time elapses since then.
-- Master assigns tasks based on **TaskNumber**. Worker notifies master about completed task number. Then, master can mark the task with **COMPLETED**.
+Tasks are made, changed, and assigned by the coordinator. It has fields:
+- **Status** can be in three state: **IDLE**, **IN_PROGRESS**, **COMPLETED**. Tasks are moving between queue based on this field.
+- **JobType**
+    1. Can be either **MAP** or **REDUCE**. A worker either execute map function or reduce function according to JobType
+    2. When no task is available, send **EXIT** task to close worker.
+- **Files** give location of the files that  worker may have to work on.
+- **UnixTime** reflects the time of last status change. It is updated to current when task changes it status. Master health check the in-progress task by how much time elapses since **UnixTime**.
+- **TaskNumber** is a unique label for the task. Worker notifies master about completion with task number. Then, master can mark the task with **COMPLETED** status and remove it from the queue.
+- **Assigned**: worker process id that request for the task
+    - When a worker is slow to reply and coordinator has already assigned the task to other worker, worker_id != Assigned. We ignore the reply.
+    - How about extend expiry of in progress task and let task forget about this field?
+        - We can't have meaningful length of expiry since it's hard to control network reliability, input size, machine resource.
 
 ```golang
 type Coordinator struct {
-	Tasks            []Task
-	IdleQ            PriorityQueue
-	ProcessPQ        PriorityQueue
+	// Your definitions here.
+	Tasks            []*Task
+	IdleQ            SafeHeap
+	ProcessPQ        SafeHeap
 	NumOfReduceTasks int
 	NumOfMapTasks    int
 	Partitions       SafeMap
 	Counter          SafeCounter
 }
 ```
-- **Tasks** slice is used for constant lookup when worker reports back with a task number. e.g. Tasks[taskNumber]
-- Use two priority queues, **IdleQ** and **ProcessPQ**, to store idle and in-progress task.
-    - A task is popped from **IdleQ** when a worker asks for it. Then, task is pushed to the **ProcessPQ**
-    - A task is removed from **ProcessPQ** and push to **IdleQ** when a in-progress task has been stale for too long
-    - why priority queue is prefered to slice?
-        - select a task based on highest priority while achieve on average $logN$ time for pop and push operations.
-        - e.g. A task that failed should be assigned soon; Remove task that has been stale for a long time or is completed
-    - Priority Queue should be thread safe.
+- **Tasks**
+    1. lookup the task when worker reports back with a task number. e.g. Tasks[taskNumber]
+- **IdleQ** and **ProcessPQ**(both are priority queues, )
+    1. Store idle and in-progress task.
+    2. A task is popped from **IdleQ** when a worker asks for it. Then, task is pushed to the **ProcessPQ**
+    3. A task is removed from **ProcessPQ** and push to **IdleQ** when a in-progress task has been stale for too long
+    4. Priority Queue should be thread safe.
         - Multiple workers can ask master for the task concurrently through RPC
-- **Partitions** collects map output file location in corresponding partitions. They should be thread safe as well.
-- Thread safe **Counter** tracks number of tasks that have completed. It is used to:
-    1. close worker and master when all tasks are finished.
-    2. make reduce tasks for each partition when all of map tasks are done.
+- **Partitions**
+    1. Collects map output file location and its corresponding partitions when a map worker notify coordinator that task is completed.
+    2. Make reduce tasks for each partition when all map tasks are completed
+- **SafeCounter**
+    1. Tracks number of tasks that have completed
+    2. Close worker and master when all tasks are finished.
+    3. Make reduce tasks for each partition when all of map tasks are done.
+    4. Thread safe
 
 ```golang
 type SafeCounter struct {
@@ -89,7 +99,8 @@ type SafeCounter struct {
 ```
 - Count tracks number of completed tasks
 - Cond is used to wake up sleeping threads when condition is met.
-    - Reduce worker receives its task from master when all map tasks are completed. Before map tasks are done, master threads are put into sleep when reduce worker as for a task.
+    1. Before map tasks are done, threads on coordinator are put into sleep when reduce worker ask for a task.
+    2. When too many workers compete for map/reduce tasks, put remaining worker into sleep. Signal sleeping worker when any of in progress task fails or is slow to respond.
 
 
 ```golang
@@ -99,14 +110,55 @@ type SafeMap struct {
 }
 ```
 - **partitions** stores partition number along with files
-- **mu** provides synchronization when multiple map workers finish tasks at the same time and ask master to update **partitions** concurrently.
+- **mu** provides synchronization when multiple map workers finish tasks at the same time and ask coordinator to update **partitions** concurrently.
 
 
 ```golang
-type PriorityQueue struct {
-	tasks []*Task
-	mu    sync.RWMutex
+type SafeHeap struct {
+	h  *PriorityQueue
+	mu sync.RWMutex
 }
+
+type PriorityQueue []*Task
 ```
-- **tasks** is a binary heap. It allows push and pop operation in $logN$ time.
-- **mu** is a read write lock that provides synchronization in concurrent push and pop, while allow many reads to be efficient.
+- **PriorityQueue** is a binary heap. It allows push and pop operation in $logN$ time.
+- Choose priority queue over slice. High priority task can be pushed and popped in logN time. A few examples:
+1. A task that failed should be assigned soon
+2. Remove stale task
+3. Remove completed task
+- **SafeHeap** provides thread safe abstraction on top of PriorityQueue
+    - **mu** is a read write lock that provides synchronization in concurrent push and pop, while allowing many reads to be efficient.
+
+```golang
+func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string)
+```
+- Worker function takes map/reduce function as input
+- Internally, it makes RPC call to the coordinator to ask for task. Notify coordinator about task completion when task is done. This process continues until coordinator responds with **EXIT** task
+
+Write files to temporary folder before moving them to target folder.
+- Machine can fail in the middle of program execution, and we might see partial state of the results. This will complicate our analysis for correctness.
+
+To make debug easier, format your log message with the following
+- master process id
+- worker process id
+- task number
+- job type
+- time
+- event that change status
+
+then you can find the event trace of task 1:
+```
+grep task_number=1 log-file*.txt
+```
+
+A daemon check expiry of the task in progress priority queue. Move tasks from progress queue to idle queue if tasks don't change status for more than 10 seconds.
+
+To validate our map/reduce implementation, write out a sequential map/reduce and compare it with distributed map/reduce. Be aware of duration and correctness.
+
+Test scenario
+1. worker crashes.
+    - os.Exit(1)
+2. worker is slow to respond.
+    - sleep
+3. worker process map/reduce tasks successfully.
+- Note that we have a single master. We have to restart everything without replication. Thus, there is not point testing this scenario.
