@@ -9,8 +9,8 @@ To process multiple tasks in parallel, dataset is distributed across multiple ma
 - Reduce function
     - input: intermediate key/value pairs for a given key
     - output: merge the value for an intermediate key and store the results in a reduce partition file.
-- Tasks are assigned by a master
-    - It simplifies the design. Worker doesn't have to remember the status of other works by over-talking on the network. Only master knows status of all the workers.
+- Tasks are assigned by a coordinator
+    - It simplifies the design. Worker doesn't have to remember the status of other works by over-talking on the network. Only coordinator knows status of all the workers.
 - Locality: worker reads input file from nearby machine
     - Network bandwidth is more likely the bottleneck
         - Modern CPU speed ~GHz
@@ -55,8 +55,8 @@ Tasks are made, changed, and assigned by the coordinator. It has fields:
     1. Can be either **MAP** or **REDUCE**. A worker either execute map function or reduce function according to JobType
     2. When no task is available, send **EXIT** task to close worker.
 - **Files** give location of the files that  worker may have to work on.
-- **UnixTime** reflects the time of last status change. It is updated to current when task changes it status. Master health check the in-progress task by how much time elapses since **UnixTime**.
-- **TaskNumber** is a unique label for the task. Worker notifies master about completion with task number. Then, master can mark the task with **COMPLETED** status and remove it from the queue.
+- **UnixTime** reflects the time of last status change. It is updated to current when task changes it status. Coordinator health check the in-progress task by how much time elapses since **UnixTime**.
+- **TaskNumber** is a unique label for the task. Worker notifies coordinator about completion with task number. Then, coordinator can mark the task with **COMPLETED** status and remove it from the queue.
 - **Assigned**: worker process id that request for the task
     - When a worker is slow to reply and coordinator has already assigned the task to other worker, worker_id != Assigned. We ignore the reply.
     - How about extend expiry of in progress task and let task forget about this field?
@@ -64,7 +64,6 @@ Tasks are made, changed, and assigned by the coordinator. It has fields:
 
 ```golang
 type Coordinator struct {
-	// Your definitions here.
 	Tasks            []*Task
 	IdleQ            SafeHeap
 	ProcessPQ        SafeHeap
@@ -80,14 +79,15 @@ type Coordinator struct {
     1. Store idle and in-progress task.
     2. A task is popped from **IdleQ** when a worker asks for it. Then, task is pushed to the **ProcessPQ**
     3. A task is removed from **ProcessPQ** and push to **IdleQ** when a in-progress task has been stale for too long
-    4. Priority Queue should be thread safe.
-        - Multiple workers can ask master for the task concurrently through RPC
+    4. A task is removed from **ProcessPQ** when a task is completed.
+    5. Priority Queue should be thread safe.
+        - Multiple workers can ask coordinator for the task concurrently through RPC
 - **Partitions**
     1. Collects map output file location and its corresponding partitions when a map worker notify coordinator that task is completed.
     2. Make reduce tasks for each partition when all map tasks are completed
 - **SafeCounter**
     1. Tracks number of tasks that have completed
-    2. Close worker and master when all tasks are finished.
+    2. Close worker and coordinator when all tasks are finished.
     3. Make reduce tasks for each partition when all of map tasks are done.
     4. Thread safe
 
@@ -139,7 +139,7 @@ Write files to temporary folder before moving them to target folder.
 - Machine can fail in the middle of program execution, and we might see partial state of the results. This will complicate our analysis for correctness.
 
 To make debug easier, format your log message with the following
-- master process id
+- coordinator process id
 - worker process id
 - task number
 - job type
@@ -161,4 +161,4 @@ Test scenario
 2. worker is slow to respond.
     - sleep
 3. worker process map/reduce tasks successfully.
-- Note that we have a single master. We have to restart everything without replication. Thus, there is not point testing this scenario.
+- Note that we have one coordinator. We have to restart everything without replication when coordinator machine crashes. Thus, there is not point testing this scenario.
