@@ -51,3 +51,22 @@ When leader sends AppendEntries RPC to a server
     - Update timeout so server won't keep becoming candidate.
     - Update the server id that server votes for. Also, update the term and transit into follower status. This ensure obselete leader follows new leader.
     - Randomize timeout so followers won't turn into candidate at the same time.
+
+**ticker** is called by follower periodically.
+1. Follower becomes candidate after timeout.
+    - Timeout is updated when leader calls AppendEntries.
+2. Candidate calls RequestVote to all peers in parallel.
+    - If RequestVote fails, retry.
+    - Collects votes. Lead when candidate wins majority.
+    - Exit early if
+        1. candidate becomes leader
+        2. follower returns with higher term
+            - Candidate returns to follower and update the term.
+        3. timeout
+3. Holds the lock. We don't want candidate changes to other status when it is collecting votes.
+
+**heartbeats** is called by leader.
+1. Leader sends AppendEntries to all peers for every 0.1s.
+    - if AppendEntries fails, retry
+    - if AppendEntries returns higher term, leader transits to follower.
+2. Holds the lock so that leader won't change to other status when sending heartbeats.
