@@ -30,3 +30,17 @@ Automated configuration change
 Snapshot
 - Leader copies state machine to snapshot. Leader calls InstallSnapshot RPC and send snapshots to lagging follower.
 - Each server maintains its own snapshot. This reduce network bandwidth where leader needs to send those snapshot to follower.
+
+# Lab A
+
+Cases of leader election
+1. All servers start as followers. Eelect a leader.
+2. Leader maintains authority.
+3. Leader fails, and new leader is elected.
+
+When a candidate send a RequestVote RPC to a server:
+1. If current server term is higher than candidate, don't give vote. Return the term so candidate can transit to follower and update its term.
+2. If current server is an outdated leader, its term is lower than the candidate. Leader transits to follower and grants vote.
+3. If current server hasn't voted or already voted for the candidate, grant vote and update the term.
+4. If current server voted for other candidate, don't grant vote.
+5. Follower has to remember candidateId that it votes. When another candidate requests for votes, it can reject the vote if id doesn't match.
