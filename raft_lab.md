@@ -41,6 +41,13 @@ Cases of leader election
 When a candidate send a RequestVote RPC to a server:
 1. If current server term is higher than candidate, don't give vote. Return the term so candidate can transit to follower and update its term.
 2. If current server is an outdated leader, its term is lower than the candidate. Leader transits to follower and grants vote.
-3. If current server hasn't voted or already voted for the candidate, grant vote and update the term.
+3. If current server hasn't voted or already voted for the candidate, grant vote.
 4. If current server voted for other candidate, don't grant vote.
 5. Follower has to remember candidateId that it votes. When another candidate requests for votes, it can reject the vote if id doesn't match.
+
+When leader sends AppendEntries RPC to a server
+1. If term of the server is higher, reject the request so that leader can update term and transit to follower.
+2. Health check succeeds.
+    - Update timeout so server won't keep becoming candidate.
+    - Update the server id that server votes for. Also, update the term and transit into follower status. This ensure obselete leader follows new leader.
+    - Randomize timeout so followers won't turn into candidate at the same time.
