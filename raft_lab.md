@@ -1,7 +1,7 @@
 # Raft
 Raft is a consensus algorithm that elects leader and replicates logs. The key challenge is to have every server owns the same copy of logs. These logs are then applied to state machine of the server. Each server has the same states and can be picked as the leader when current leader fails. Its design achieves fault tolerance, availability, and safety.
 
-In raft, server is in candidate, leader or follower state.
+In raft, server is in either of following: candidate, leader or follower state.
 
 Leader
 - Candidate server becomes leader by winning the most votes from follower in current term.
@@ -17,8 +17,8 @@ Follower
 
 Safety
 - once logs are commited, system won't lose it. When leader fails, new leader can be elected without losing data or return wrong data to the client. To achieve safety, raft does the following
-    1. check consistency while leader replicates logs to follower
-    2. while candidate requests logs, check whether logs are up to date
+    1. check consistency while leader replicates logs to the follower
+    2. while candidate requests votes from followers, check whether logs are up to date
 
 Log compaction
 - once logs are applied to state machine, it can be removed from durable storage so that space is enough for new logs.
