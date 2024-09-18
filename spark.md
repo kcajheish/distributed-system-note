@@ -32,7 +32,7 @@ how to construct RDD
 - parallelizing
     - split a scala collection
 - change persistence of RDD
-    - cache(lazy) vs materizlied in memory on demand
+    - materizlied in memory on demand
         - cache is not used if out of memory or node fails
     - save
 
@@ -43,13 +43,6 @@ operations: turn files into RDD or RDD into other RDD
 - foreach
 - collect
     - sends elements to a driver
-
-shared variables
-- updated with closure(map, filter, reduce)
-- boadcasted variable
-    - send lookup table to the worker once
-- accumulator
-    - added with associative function and read by a driver
 
 ```
 # code
@@ -125,7 +118,7 @@ RDD
         - e.g. join
         - children wait until parents are done and shuffles data
         - slow recovery
-            - a failed node leads to recompute of all child nodes
+            - a failed node leads to recompute of all parent nodes
     - narrow
         - a partition of parent is sent to a child partition
         - e.g. map
@@ -163,6 +156,7 @@ how does spark manage its memory?
 
 To further optimize recovery, checkpoint RDD to storage to avoid traversing whole lineage graph.
 - how checkpoint benefit wide dependency?
-    - A node failure causes lose
+    - A node failure causes loss of data in parent node, and data need recomputed.
+    - By checkpointing, recomputation is avoided.
 - why checkpoint doesn't need synchronization?
     - Spark is read only. It doesn't have consistency issue so all checkpoint processes can be async for better performance.
