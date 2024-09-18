@@ -136,3 +136,33 @@ HDFS
 - iterator: read the block
 - preferredLocations: return node that block of a file is on
 - partitions: return a partition for each block of the file
+
+## Implementation
+
+Each program is run as Meso application.
+- Each application has its own master & workers.
+- Application may share resource.
+
+how to schedule job?
+- track location of a partition of RDD in memory
+- compute lineage graph right after program runs
+- launch task to compute missing RDD
+    - re-run task on another node if the node fails
+    - intermediate output is stored in parent node
+
+how does spark manage its memory?
+- thee ways to store RDD
+    - deserialized java object in memory
+        - efficient for JVM to fetch and compute
+        - consume large memory space
+    - serialized RDD in memory
+        - slow for JVM
+        - consume less memory space
+    - persist in disk
+- Use LRU to evict a partition of RDD when memory space is not enough for new partition
+
+To further optimize recovery, checkpoint RDD to storage to avoid traversing whole lineage graph.
+- how checkpoint benefit wide dependency?
+    - A node failure causes lose
+- why checkpoint doesn't need synchronization?
+    - Spark is read only. It doesn't have consistency issue so all checkpoint processes can be async for better performance.
