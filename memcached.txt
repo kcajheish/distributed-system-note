@@ -1,0 +1,154 @@
+Scaling Memcache at Facebook
+
+Memcached is in-memory key value store.
+    It supports get, put and delete operation for a key.
+    With memcache, caching layer and app layer can be scaled independently.
+
+Keys are sharded to spread the load across server.
+    Consistent hash is used to determine memcached server location a key belongs to.
+    Client library holds location for memcached servers and issue request on the behalf of webserver.
+
+Mcrouter is proxy.
+    It receives requests from database daemon or webserver.
+    Then, requests are batched and then broadcasted to the correct memcached server.
+    Packet rate is reduced as a result.
+
+When webserver handles a request, it may talk over the network to many memcached server for a range of keys.
+    To minimize round trips, DAG shows dependency between data and whether concurrent queries are possible.
+    Network connection of get request is UDP.
+        Packet drop or out of order is treated as client error.
+        Connection overhead is reduced.
+        Network is less congested.
+        Latency is reduced.
+    Network connection of put/delete request is http
+        Put/delete oepration needs to be reliable to achieve consistency.
+    Sliding window controls number of packets on the network.
+        large window size, network is congested
+        small window size, requests are serialized and take more time to process.
+    Coalescing connection is achieved by mcrouter.
+        Connection overhead is reduced.
+        Network throughput is increased.
+
+
+Access pattern is look aside cache. Keys are invalidated when a key is updated/deleted.
+    One way is to invalidate cache through web server.
+    The issues
+        1. Webserver is bad at batching/pipelining request.
+        2. Invalidation request can't be replayed after web server crashes. An aggresive purge or restart of cluster is usually required.
+    Second way is to invalidate cache through mcsequeal delete streams.
+        It leverages commit logs in database which are already checkpointed.
+        Delete/update streams can be replayed as a result.
+
+A region has many clusters. One region is master, and the rest of region is slave.
+    Can recover quickly from disaster.
+    Handle more loads for a key range.
+    User can get key from cluster close to his region.
+
+Use lease to prevent stale set and thundering herd.
+    Stale set: update key with stale value.
+        Grant lease to client when cache miss.
+        Any key deletion afterward revoke lease.
+        Client write is cancelled since lease is revoked.
+        Stale set is prevented.
+
+    Thundering herd: after a write, a key is invalidated, and subsequent read becomes expensive(fallback to db).
+        Lease is granted once for every 10 seconds.
+        One of many read client gets the lease after a cache miss.
+        The rest has to wait until lease is removed. They read from cache.
+        Thundering herd is prevented since only one client read from database.
+
+        Stale value is saved temporarily in a data structure.
+        In some case, stale value is servered directly so app can make progress.
+
+Use different pool to account for different workload in apps.
+    Wildcard pool
+        For general workload.
+
+    Special pool
+        Cache churns when key is updated often but seldom be read.
+        Most of cache resources are wasted.
+        Low churn keys are eliminiated even they are read often
+        Solution is one pool for low churn item and the other for high churn.
+
+Replication vs Sharding
+    Sharding is slow when a range of keys is queries.
+    Requests are sent to more shards to get keys. Results need merged.
+    Also sharding can't solve hot key problem.
+
+    Replica solves hot key problem. Also network is less congested.
+    But it is hard to maintain consistency across replicas.
+
+Gutter protects backend service when a cluster goes offline.
+    Gutter(as replicas) replaces failed cluster. It accepts all key operations.
+    (x) Repartition
+        Make hot key problem becomes worse since now few servers can handle traffics after one goes offline.
+
+Regional pool
+    Frontend clusters share memcached servers in the pool.
+        If frontend/memcacahed server is one to one, infrequent access data is replicated and saved.
+        This leads to bandwidth/memory/cpu inefficiency.
+        But with one to one, it easier to take few cluster offline for maintenance.
+
+    Item with low access rate is good for regional pool since they have low impact on inter cluster bandwidth.
+
+
+Cold cluster warmup
+    Cold cluster has empty cache. It has low hit rate.
+    Warmup cluster by replicate item from warm cluster.
+    ~= Few hours
+
+    Race condition
+        results are no-deterministic and depends on timing of events
+
+        Client A updates cold cluster. In the mean time, client B read from hot cluster.
+        B reads stale value since replication stream doesn't catch up.
+        Sol: Use two seconds hold off. Wait for 2 seconds so replication stream catch up.
+
+Across region consistency
+    It's a challenge to maintain consistency across all clusters.
+        MySQL & Memcached clusters are both deployed to multiple region.
+        MySQL replica lags behind master. So does Memcached.
+
+    Consistency when write from master region
+        A key is updated at master.
+        Invalidation reaches slave region before replication stream.
+        A read in between cache stale data.
+        Sol: Use mcsequeal to broad cast invalidation.
+
+    At slave region, write to master and then read stale data from slave.
+        Sol: remote marker
+        After write, remove key from cache and set a marker of key.
+        Next read to the same key in slave is directed to master region because cache miss and marker exists.
+        Marker is removed when replication stream catch up in slave.
+
+    Operation efficiency
+        invalidation stream and replication stream shares the same channel. It increase network efficiency.
+
+        Deletes are buffers at mcrouter if downstream service is not reopnsive. If it does, replay deletes.
+        Alternatively, take cluster offline or over-invalidate data.
+
+Performance optimization
+    Multiget
+        Pack many keys in a single request to memcached and save round trip.
+
+    Fine grained lock
+        Avoid a global lock for many threads and achieve parallelism.
+
+    UDP over TCP
+        Trade reliability for performance.
+
+Adaptive slab allocator
+    Minimize cache eviction under memory constraints.
+
+    Slab assignment
+        Chunks of memory assigned to memcached server for different workload.
+        Different class of slab holds various item size.
+        Memory is move between slab class when one is evicted more often than the other.
+
+    Eviction
+        Least recently used items are evicted.
+
+    Hybrid: lazily evict & proactively evict short-lived key
+
+Software upgrade
+    Minimize disruption by saving item in system V shared memory region.
