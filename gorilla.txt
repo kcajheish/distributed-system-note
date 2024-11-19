@@ -1,0 +1,99 @@
+Gorilla: A Fast, Scalable, In-Memory Time Series Database
+
+In-memory time series database
+  Assumption
+  Recent data is more important than historical data
+  Aggregated data is more important than single data point
+
+  Optimize for high availability at the cost of write loss;
+  Compression results in reduction in latency and increase in throughput
+  Used in real time monitoing and debugging tool
+
+Write Through cache
+  String key, 64 bit timestamp, floating point value
+  Compression leads to 12x reduction in size
+  Constant lookup of a time series
+  Achieve horizontal scaling by partitioning
+    Add more hosts
+    Partition key and select a host to store that key
+
+Data is backup in different region.
+  Read queries failover to backup region after a failure
+
+Compression scheme: xor comparition with previous value to generate delta encoding
+  Compress streams of floating point data without loss of resolution
+  A pair of 64 bit timestamp/value is compressed
+
+  Convert timestamp to delta of delta
+  t   02:01:02 02:02:02 02:03:02 02:04:01 02:05:02
+  dt  60, 60, 59, 61
+  ddt 0, -1, 2
+
+  Header: starting timestamp
+  first timestamp: delta from starting
+  the rest: (tn - tn-1) - (tn-1 - tn-2)
+
+  For value, use xor to mark the change bit
+  v[0], v[0] ^ v[1], v[1] ^ v[2]
+  Current value and previous value doesn't change alot.
+  Most XORed value has same leading/trailing zero.
+  The meaningful bits occupy same bit position.
+
+Architecture
+  Timeseries map
+  Map from series name to timeseries vector
+  A vector of pointer to timeseries vector
+  Tombstone put the index of a timeseries in a free pool after that series is deleted.
+  Concurrent access to map/vector is manged by rw spin-lock.
+  Each timeseries is protected by a spinlock
+
+  Shard Map
+  Maps shard to timeseries map.
+  Concurrent access is manged by spinlock
+
+  Reduce fragmentation
+  Timeseries is a sequence of blocks.
+  Each open block lasts for two hours and then closed.
+  Data in a closed block is moved to large slab afterward.
+  Fragmentation is reduced.
+
+  Use distributed file system for persistence.
+  Failure of a single host won't lose data
+
+  Each host has a dedicate directory for each shard. There are
+    Key list
+    Append only log
+    Complete block file
+    Checkpoint file
+
+  Key list
+  Vector of <string key: index in vector>
+
+  Append only log
+  Timestamp/value pairs are interleaved across timestamp
+  An overhead to store unique id of a timeseries.
+
+  No ACID
+  Data is buffered before flushed to disk.
+  Write rate to disk is high, compared to WAL.
+  If a node crashes before flushing, all data are lost.
+  ACID is violated since data is not durable and can't be rollbacked with undo log.
+
+  Block file and checkpoint
+  For every two hours, a block of data in timeseries is moved to block file.
+  Checkpoint file marks the block file and delete corresponding log
+
+Fault tolerance
+  The most recent data moves fist in the shard movement
+  Prioritize recent data over historical one
+
+  Writes are streamed to two instances in different region.
+  When an instance is not avaialable, read request is directed to the backup instance.
+
+  Shard manager is implemented by paxos. It redistributes shards as a node fails.
+  When a node crashes and can't recover, write client buffer write requests for 1 min until shard moves to a new node.
+
+  If outage lasts for more than 1 min, oldest write data in the buffer is removed.
+
+  Partial data is returned to read client before a node is fully recovered.
+  Most detection system only needs most recent data to make progress.
